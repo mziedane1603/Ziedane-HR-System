@@ -2225,6 +2225,9 @@ input.field-ok,select.field-ok{border-color:var(--green)!important;}
         <div class="page-sub">إدارة حسابات المستخدمين وصلاحيات الوصول</div>
         <div class="page-actions"><button class="btn-primary" onclick="openUserModal()">+ مستخدم جديد</button></div>
       </div>
+      <div class="card" style="margin-bottom:14px;padding:12px 16px;font-size:12.5px;line-height:1.9;border-color:rgba(20,166,142,.35);">
+        🔐 <b>الدخول بقى عن طريق Firebase Authentication:</b> بعد إضافة المستخدم هنا (الدور والصلاحيات)، لازم تنشئ له حساب في Firebase Console ← Authentication ← Users بإيميل = <code>اسم_المستخدم@ziedane.invalid</code> (مثال: <code>hr@ziedane.invalid</code>)، وتضيف الإيميل في قواعد Firestore. كلمة السر اللي بتتحط هنا مبقتش بتتستخدم في الدخول.
+      </div>
       <div class="card" style="padding:0;"><div class="tbl-wrap"><table>
         <thead><tr><th>اسم المستخدم</th><th>الاسم</th><th>الدور</th><th>الصلاحيات</th><th>آخر دخول</th><th>إجراءات</th></tr></thead>
         <tbody id="users-tbody"></tbody>
@@ -5790,6 +5793,88 @@ const FB_CONFIG = {
 const FS_BASE = `https://firestore.googleapis.com/v1/projects/${FB_CONFIG.projectId}/databases/(default)/documents`;
 
 // ══════════════════════════════════════════════════════════
+// 🔐 Firebase Authentication (REST) — تسجيل دخول حقيقي بدل كلمة السر المكتوبة في الكود
+// الموظف/المدير بيسجّل دخول بحسابه في Firebase، والتوكن بيتبعت مع كل طلب لـ Firestore،
+// وقواعد Firestore الجديدة بترفض أي طلب من غير توكن صالح.
+// ══════════════════════════════════════════════════════════
+const AUTH_EMAIL_DOMAIN  = 'ziedane.invalid';          // اسم المستخدم "hr" => hr@ziedane.invalid
+const AUTH_SESSION_KEY   = 'zh_auth_session';
+let _auth = null;                                      // {email, uid, idToken, refreshToken, exp}
+
+function authUsernameToEmail(input){
+  const s = String(input||'').trim();
+  if(s.includes('@')) return s.toLowerCase();          // لو كتب إيميل كامل نستخدمه زي ما هو
+  let local = s.toLowerCase().replace(/\s+/g,'.');
+  if(!/^[a-z0-9._+\-]+$/.test(local)){                 // أسماء عربية/رموز: صيغة ثابتة مشتقة من الاسم
+    local = 'u' + Array.from(new TextEncoder().encode(s.toLowerCase())).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+  return `${local}@${AUTH_EMAIL_DOMAIN}`;
+}
+function authNotify(msg){
+  try{ if(typeof toast==='function') toast(msg,'error'); else if(typeof showToast==='function') showToast(msg,'err'); }catch(e){}
+}
+function _authPersist(){ try{ sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(_auth)); }catch(e){} }
+function authRestore(){                                // للموبايل والإدخال السريع (بيرجّعوا الجلسة بعد ريفريش)
+  try{ const s = JSON.parse(sessionStorage.getItem(AUTH_SESSION_KEY)||'null'); if(s && s.refreshToken) _auth = s; }catch(e){}
+  return !!_auth;
+}
+function authSignOut(){ _auth = null; try{ sessionStorage.removeItem(AUTH_SESSION_KEY); }catch(e){} }
+function authIsSignedIn(){ return !!_auth; }
+
+async function authSignIn(email, password){
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FB_CONFIG.apiKey}`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ email, password, returnSecureToken:true })
+  });
+  const d = await res.json().catch(()=>({}));
+  if(!res.ok || !d.idToken){
+    const code = String(d?.error?.message || 'UNKNOWN').split(' ')[0];
+    const err = new Error(code); err.code = code; throw err;
+  }
+  _auth = { email: d.email || email, uid: d.localId, idToken: d.idToken, refreshToken: d.refreshToken,
+            exp: Date.now() + (parseInt(d.expiresIn,10)||3600)*1000 };
+  _authPersist();
+  return _auth;
+}
+async function authRefresh(){
+  if(!_auth || !_auth.refreshToken){ const e=new Error('NO_SESSION'); e.code='NO_SESSION'; throw e; }
+  const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FB_CONFIG.apiKey}`, {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(_auth.refreshToken)
+  });
+  const d = await res.json().catch(()=>({}));
+  if(!res.ok || !d.id_token){
+    authSignOut();
+    authNotify('انتهت جلسة الدخول — سجّل الدخول مرة تانية');
+    const e = new Error('SESSION_EXPIRED'); e.code = 'SESSION_EXPIRED'; throw e;
+  }
+  _auth = { ..._auth, idToken: d.id_token, refreshToken: d.refresh_token || _auth.refreshToken,
+            exp: Date.now() + (parseInt(d.expires_in,10)||3600)*1000 };
+  _authPersist();
+  return _auth;
+}
+async function authGetToken(){
+  if(!_auth) return null;
+  if(Date.now() > _auth.exp - 120000) await authRefresh();   // نجدّد قبل ما يخلص بدقيقتين
+  return _auth.idToken;
+}
+
+// fetch لطلبات Firestore: بيضيف توكن الدخول، ولو السيرفر رد 401 بيجدّد التوكن ويعيد المحاولة مرة
+async function fsFetch(url, opts = {}){
+  const headers = Object.assign({}, opts.headers || {});
+  let token = null;
+  try{ token = await authGetToken(); }catch(e){ token = null; }
+  if(token) headers['Authorization'] = 'Bearer ' + token;
+  let res = await fetch(url, { ...opts, headers });
+  if(res.status === 401 && _auth){
+    try{ await authRefresh(); headers['Authorization'] = 'Bearer ' + _auth.idToken; res = await fetch(url, { ...opts, headers }); }catch(e){}
+  }
+  if(res.status === 401 || res.status === 403) window._cloudDenied = true;
+  else if(res.ok) window._cloudDenied = false;
+  return res;
+}
+
+// ══════════════════════════════════════════════════════════
 // 📎 تخزين الملفات (PDF البطاقة الشخصية، أوراق الشركة)
 // ملحوظة: Firebase Storage اتجرّب الأول لكنه بيفشل بـ "Failed to fetch" بسبب قيود CORS
 // على الـ bucket (محتاجة إعداد gsutil cors خارج الملف ده تمامًا). الحل الأضمن: نخزّن
@@ -5845,7 +5930,7 @@ async function deleteFileFromStorage(fileId){
   if(!fileId) return;
   try{
     const url = `${FS_BASE}/zh_files/${fileId}?key=${FB_CONFIG.apiKey}`;
-    await fetch(url, { method:'DELETE' });
+    await fsFetch(url, { method:'DELETE' });
   }catch(e){ /* تجاهل فشل الحذف — مش حرج لو الملف القديم فضل موجود بدون استخدام */ }
 }
 
@@ -5862,7 +5947,7 @@ async function fsSet(collection, docId, data){
     _token:     { stringValue: APP_SECRET }
   };
   const url = `${FS_BASE}/${collection}/${docId}?key=${FB_CONFIG.apiKey}`;
-  const res = await fetch(url, {
+  const res = await fsFetch(url, {
     method: 'PATCH',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({fields})
@@ -5886,7 +5971,7 @@ async function fsSet(collection, docId, data){
       st.title=msg; st.textContent='⚠️ خطأ كلاود — اضغط للتفاصيل';
       st.onclick=()=>alert('سبب عدم المزامنة:\n\n'+msg+'\n\nالحل: افتح Firebase Console → Firestore → Rules واضبطها كما هو موضح في الكود');
     }
-    throw new Error(msg);
+    const werr = new Error(msg); werr.status = res.status; throw werr;
   }
   window._fsErrShown = false;
   return res.json();
@@ -5894,9 +5979,9 @@ async function fsSet(collection, docId, data){
 
 async function fsGet(collection, docId){
   const url = `${FS_BASE}/${collection}/${docId}?key=${FB_CONFIG.apiKey}`;
-  const res = await fetch(url);
+  const res = await fsFetch(url);
   if(res.status===404) return null;
-  if(!res.ok) throw new Error(`Firestore read failed: ${res.status}`);
+  if(!res.ok){ const rerr = new Error(`Firestore read failed: ${res.status}`); rerr.status = res.status; throw rerr; }
   const doc = await res.json();
   // التحقق من الـ token عند القراءة
   const token = doc.fields?._token?.stringValue;
@@ -6336,40 +6421,85 @@ async function doLogin(){
   const p=document.getElementById('l-pass').value;
   const loginBtn=document.querySelector('.login-btn-main');
   const errEl=document.getElementById('l-err');
+  const fail=(msg)=>{
+    if(loginBtn){ loginBtn.textContent='دخول →'; loginBtn.disabled=false; }
+    errEl.textContent=msg;
+    document.getElementById('l-pass').value='';
+    setTimeout(()=>errEl.textContent='',4500);
+  };
 
   if(!u||!p){
     errEl.textContent='أدخل اسم المستخدم وكلمة المرور ❌';
     setTimeout(()=>errEl.textContent='',3000);
     return;
   }
+  if(loginBtn){ loginBtn.textContent='⟳ جاري التحقق...'; loginBtn.disabled=true; }
 
-  // ── Step 1: If online and no runtimeUsers yet → fetch from Firebase first ──
-  if(_isOnline && !runtimeUsers){
-    if(loginBtn){ loginBtn.textContent='⟳ جاري التحقق...'; loginBtn.disabled=true; }
+  // ── Step 1: تسجيل الدخول عبر Firebase Authentication (حساب حقيقي، مش كلمة سر في الكود) ──
+  const email = authUsernameToEmail(u);
+  let fbOk = false;
+  if(_isOnline){
+    try{ await authSignIn(email, p); fbOk = true; }
+    catch(e){
+      if(e.code==='TOO_MANY_ATTEMPTS_TRY_LATER'){ fail('محاولات غلط كتير — استنى شوية وجرّب تاني ⏳'); return; }
+      if(e.code==='USER_DISABLED'){ fail('الحساب ده موقوف — كلّم المدير 🚫'); return; }
+      // أي خطأ تاني (الحساب لسه مش متفعّل في Firebase / الباسورد غلط) → نكمل للتحقق القديم (وضع انتقالي)
+    }
+  }
+
+  // ── Step 2: قائمة المستخدمين (الأدوار والصلاحيات) من الكلاود ──
+  if(_isOnline && (fbOk || !runtimeUsers)){
     try {
       const meta = await fsGet('zh_data','meta');
       if(meta?.runtimeUsers?.length){
         runtimeUsers = meta.runtimeUsers;
       }
-    } catch(e){ /* offline or error — fall back to USERS */ }
+    } catch(e){
+      if(fbOk && (e.status===401||e.status===403)){
+        authSignOut();
+        fail('الحساب ده مش مصرّح له بالوصول لبيانات النظام — كلّم المدير 🔒');
+        return;
+      }
+      /* offline or error — fall back to USERS */
+    }
   }
 
   const allUsers = runtimeUsers||USERS;
-  const pHash = await hashPassword(p);
-  const found = allUsers.find(x=>x.user===u && (x.pass===pHash || x.pass===p));
-
-  if(!found){
-    if(loginBtn){ loginBtn.textContent='دخول →'; loginBtn.disabled=false; }
-    errEl.textContent='اسم المستخدم أو كلمة المرور غلط ❌';
-    document.getElementById('l-pass').value='';
-    setTimeout(()=>errEl.textContent='',3000);
-    return;
+  let found;
+  if(fbOk){
+    // الدخول اتأكد من Firebase — هنا بس بنجيب الدور والصلاحيات
+    found = allUsers.find(x=> x.user===u || authUsernameToEmail(x.user)===email || (x.email && String(x.email).toLowerCase()===email));
+    if(!found){
+      authSignOut();
+      fail('الحساب موجود في Firebase بس مش مضاف في صفحة المستخدمين — كلّم المدير ❌');
+      return;
+    }
+  } else {
+    const pHash = await hashPassword(p);
+    found = allUsers.find(x=>x.user===u && (x.pass===pHash || x.pass===p));
+    if(!found){
+      fail('اسم المستخدم أو كلمة المرور غلط ❌');
+      return;
+    }
+    // وضع انتقالي: لو قواعد الحماية الجديدة شغّالة والحساب لسه مش متفعّل في Firebase، مينفعش ندخل
+    if(_isOnline){
+      try{ await fsGet('zh_data','meta'); }
+      catch(e){
+        if(e.status===401||e.status===403){
+          fail('حسابك لسه مش متفعّل في نظام الحماية الجديد — اطلب من المدير ينشئه في Firebase 🔒');
+          return;
+        }
+      }
+    }
   }
 
   found.lastLogin=Date.now();
   // ✅ Admin دايماً بياخد كل الصفحات من ROLES — نمسح أي pages قديمة محفوظة
   if(found.role === 'admin') delete found.pages;
   currentUser=found;
+  if(!fbOk && _isOnline){
+    setTimeout(()=>{ try{ toast('⚠️ دخلت بالوضع الانتقالي (من غير Firebase Auth) — اطلب تفعيل حسابك','error'); }catch(ex){} },1500);
+  }
 
   if(loginBtn){ loginBtn.textContent='⟳ جاري المزامنة...'; loginBtn.disabled=true; }
 
@@ -6390,8 +6520,10 @@ async function doLogin(){
     showApp();
   }
 }
+
 function doLogout(){
-  stopPresence();
+  const _oldAuth = _auth;
+  Promise.resolve(stopPresence()).finally(()=>{ if(_auth===_oldAuth) authSignOut(); });
   currentUser=null;
   // إعادة تعيين الـ selects عشان المستخدم الجديد يلاقيها نظيفة
   ['att-year','att-month','pr-year','pr-month','slip-year','slip-month',
@@ -14219,6 +14351,16 @@ async function doEmpLogin() {
   const p = gid('pl-pass')?.value||'';
   const err = gid('pl-err');
   if(!u||!p) { if(err) err.textContent='أدخل اسم المستخدم وكلمة المرور'; return; }
+  // 🔒 لو قواعد الحماية الجديدة شغّالة، بوابة الموظف مش متاحة لحد ما يتفعّل نظام دخول الموظفين
+  if(_isOnline){
+    try{ await fsGet('zh_data','meta'); }
+    catch(ex){
+      if(ex.status===401||ex.status===403){
+        if(err) err.textContent='🔒 البوابة متوقفة مؤقتًا لتحديث نظام الحماية — تواصل مع الموارد البشرية';
+        return;
+      }
+    }
+  }
 
   // 🔐 تشفير كلمة المرور المدخلة للمقارنة (التوافق مع باسوردات قديمة غير مشفرة)
   const pHash = await hashPassword(p);
@@ -20975,7 +21117,7 @@ async function _pingPresence() {
     };
     // Use Firestore REST directly (same pattern as fsSet but for presence)
     const url = `${FS_BASE}/${PRESENCE_COL}/${encodeURIComponent(currentUser.username || currentUser.name)}?key=${FB_CONFIG.apiKey}`;
-    await fetch(url, {
+    await fsFetch(url, {
       method: 'PATCH',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
@@ -20994,7 +21136,7 @@ async function _removePresence() {
   if (!currentUser || !_isOnline) return;
   try {
     const url = `${FS_BASE}/${PRESENCE_COL}/${encodeURIComponent(currentUser.username || currentUser.name)}?key=${FB_CONFIG.apiKey}`;
-    await fetch(url, { method: 'DELETE' });
+    await fsFetch(url, { method: 'DELETE' });
   } catch(e) {}
 }
 
@@ -21003,7 +21145,7 @@ async function _fetchOnlineUsers() {
   if (!_isOnline) return [];
   try {
     const url = `${FS_BASE}/${PRESENCE_COL}?key=${FB_CONFIG.apiKey}&pageSize=50`;
-    const res = await fetch(url);
+    const res = await fsFetch(url);
     if (!res.ok) return [];
     const data = await res.json();
     if (!data.documents) return [];
