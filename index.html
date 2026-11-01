@@ -2163,6 +2163,11 @@ input.field-ok,select.field-ok{border-color:var(--green)!important;}
         <div class="page-actions">
           <select id="slip-year" onchange="renderSlips()" style="width:90px;padding:7px 10px;border-radius:var(--r);border:1.5px solid var(--line2);font-family:'Tajawal',sans-serif;font-size:13px;background:var(--surface);"></select>
           <select id="slip-month" onchange="renderSlips()" style="width:110px;padding:7px 10px;border-radius:var(--r);border:1.5px solid var(--line2);font-family:'Tajawal',sans-serif;font-size:13px;background:var(--surface);:'Tajawal',sans-serif;font-size:13px;"></select>
+          <div style="display:flex;gap:4px;">
+            <button id="slip-mode-full" class="btn-sm" onclick="setSlipMode('full')">📄 تفصيلية</button>
+            <button id="slip-mode-brief" class="btn-sm" onclick="setSlipMode('brief')">🧾 مختصرة</button>
+          </div>
+          <button id="slip-print-all" class="btn-ghost" style="display:none;" onclick="printAllBriefSlips()">🖨 طباعة الكل (مختصر)</button>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:260px 1fr;gap:16px;" id="slip-grid">
@@ -5052,6 +5057,7 @@ input.field-ok,select.field-ok{border-color:var(--green)!important;}
       <div class="field"><label>جزاء</label><input type="number" id="pe-penalty" step="0.01" oninput="recalcPr()"/></div>
       <div class="field"><label>دمغة</label><input type="number" id="pe-stamp" step="0.01" oninput="recalcPr()"/></div>
       <div class="field"><label>خصم سلفة</label><input type="number" id="pe-loan" step="0.01" oninput="recalcPr()"/></div>
+          <div class="field"><label>بدلات (تُضاف على الصافي)</label><input type="number" id="pe-badlat" step="0.01" oninput="recalcPr()"/></div>
     </div>
     <div id="prt-comm" class="form-grid g2" style="display:none;">
       <div class="field"><label>العمولة</label><input type="number" id="pe-commission" step="0.01" oninput="recalcPr()"/></div>
@@ -9960,7 +9966,7 @@ function openPrEdit(code,month){
   const e=empObj(code)||{name:'—'};
   gid('pr-edit-title').textContent='تعديل: '+e.name;
   gid('pr-edit-sub').textContent=monthLabel(month);
-  const fields=['basic','comp','jobA','other','rep','extra','kasb','insEmp','insCo','absent','late','penalty','stamp','loan','commission','commKasb','quarter','qKasb','overtime'];
+  const fields=['basic','comp','jobA','other','rep','extra','kasb','insEmp','insCo','absent','late','penalty','stamp','loan','badlat','commission','commKasb','quarter','qKasb','overtime'];
   fields.forEach(f=>sv('pe-'+f,p[f]||0));
   setPrTab('salary',gid('pet-salary'));
   recalcPr(); gid('pr-edit-modal').style.display='flex';
@@ -9970,7 +9976,7 @@ function setPrTab(t,btn){['salary','deduct','comm'].forEach(x=>{gid('prt-'+x).st
 function recalcPr(){
   const total=fv('pe-basic')+fv('pe-comp')+fv('pe-jobA')+fv('pe-other')+fv('pe-rep')+fv('pe-extra');
   const deduct=fv('pe-kasb')+fv('pe-insEmp')+fv('pe-insCo')+fv('pe-absent')+fv('pe-late')+fv('pe-penalty')+fv('pe-stamp')+fv('pe-loan');
-  const net=total-deduct;
+  const net=total-deduct+fv('pe-badlat');
   const commNet=fv('pe-commission')-fv('pe-commKasb');
   const qNet=fv('pe-quarter')-fv('pe-qKasb');
   const grand=net+commNet+qNet+fv('pe-overtime');
@@ -10018,7 +10024,7 @@ function savePrEdit(){
   const month=editingPrMonth, code=editingPrCode;
   if(!state.payroll[month]) state.payroll[month]=[];
   const idx=state.payroll[month].findIndex(x=>x.empCode===code);
-  const fields=['basic','comp','jobA','other','rep','extra','kasb','insEmp','insCo','absent','late','penalty','stamp','loan','commission','commKasb','quarter','qKasb','overtime'];
+  const fields=['basic','comp','jobA','other','rep','extra','kasb','insEmp','insCo','absent','late','penalty','stamp','loan','badlat','commission','commKasb','quarter','qKasb','overtime'];
   const data={empCode:code}; fields.forEach(f=>data[f]=fv('pe-'+f));
   if(idx>=0) state.payroll[month][idx]=data; else state.payroll[month].push(data);
   state.importedMonths.add(month);
@@ -10041,7 +10047,7 @@ function exportPayrollExcel(){
       'إجمالي الراتب':p.total,
       'بدلات إضافية':p.extra||0,
       'كسب العمل':p.kasb||0,'تأمين عامل':p.insEmp||0,'تأمين شركة':p.insCo||0,
-      'غياب':p.absent||0,'تأخير':p.late||0,'جزاء':p.penalty||0,'دمغة':p.stamp||0,'سلفة':p.loan||0,
+      'غياب':p.absent||0,'تأخير':p.late||0,'جزاء':p.penalty||0,'دمغة':p.stamp||0,'سلفة':p.loan||0,'بدلات تضاف للصافي':p.badlat||0,
       'إجمالي الاستقطاعات':p.deduct,
       'المستحق':p.mustahaq,'صافي الراتب':p.net,
       'العمولة الإجمالية':p.commission||0,'كسب عمل عمولة':p.commKasb||0,'صافي العمولة':p.commNet||0,
@@ -10175,7 +10181,7 @@ function confirmPrImport(){
       quarter:    finalQuarter,
       qKasb:      finalQKasb,
       overtime:   _pf(r,'أوفرتايم','اوفرتايم','Overtime'),
-      badlat:     0,
+      badlat:     _pf(r,'بدلات تضاف للصافي'),
     };
   }).filter(Boolean);
   if(!rows.length){alert('لا توجد بيانات صحيحة — تأكد من وجود عمود "الكود"');return;}
@@ -10199,7 +10205,7 @@ function navToSlip(code,month){
   if(gid('slip-month')) gid('slip-month').value=month;
   renderSlips();
   // Show this employee's slip after a tick — pass null since no click element context
-  setTimeout(()=>showSlipForEmp(code,month,null),50);
+  setTimeout(()=>openSlip(code,month,null),50);
 }
 
 function printPayroll(){
@@ -10254,11 +10260,109 @@ function printPayroll(){
 function renderSlips(){
   _populateYearSel('slip-year', renderSlips);
   _populateMonthSel('slip-month', renderSlips);
+  _slipModeUI();
   const key=_getYMValue('slip-year','slip-month');const q=(gid('slip-search')?.value||'').toLowerCase();
   const pr=(state.payroll[key]||[]);
   const filtered=pr.filter(p=>!q||empName(p.empCode).toLowerCase().includes(q));
-  gid('slip-list').innerHTML=filtered.map(p=>{const e=empObj(p.empCode)||{name:'—'};const cp=calcPrRow(p);return`<div onclick="showSlipForEmp(${p.empCode},'${key}',this)" style="padding:10px 14px;border-bottom:1px solid #e8e8e4;cursor:pointer;transition:background .1s;" onmouseover="this.style.background='#f7f7f5'" onmouseout="this.style.background=''"><div style="font-weight:600;font-size:13px;">${escapeHTML(e.name)}</div><div style="font-size:11px;color:#0daf72;font-family:monospace;margin-top:2px;">${fmt(cp.netIncome)} جنيه</div></div>`;}).join('')||'<div style="text-align:center;padding:20px;color:#aeaebb;">لا توجد بيانات</div>';
+  gid('slip-list').innerHTML=filtered.map(p=>{const e=empObj(p.empCode)||{name:'—'};const cp=calcPrRow(p);return`<div onclick="openSlip(${p.empCode},'${key}',this)" style="padding:10px 14px;border-bottom:1px solid #e8e8e4;cursor:pointer;transition:background .1s;" onmouseover="this.style.background='#f7f7f5'" onmouseout="this.style.background=''"><div style="font-weight:600;font-size:13px;">${escapeHTML(e.name)}</div><div style="font-size:11px;color:#0daf72;font-family:monospace;margin-top:2px;">${fmt(cp.netIncome)} جنيه</div></div>`;}).join('')||'<div style="text-align:center;padding:20px;color:#aeaebb;">لا توجد بيانات</div>';
 }
+// ══════════════════════════════════════════════════════════
+// 🧾 قسيمة الراتب المختصرة
+//   الراتب = الإجمالي − تأمين الشركة
+//   الصافي = الراتب − كسب العمل − تأمين العامل − غياب − تأخير − جزاء + بدلات
+// ملحوظة: الصيغة دي (زي ما اتحدّدت) مفيهاش السلف والدمغة والعمولة والأوفرتايم،
+// فالصافي هنا ممكن يختلف عن "الصافي" في كشف الرواتب لو الموظف عليه سلفة أو دمغة.
+// ══════════════════════════════════════════════════════════
+let _slipMode = (()=>{ try{ return localStorage.getItem('zh_slip_mode')==='brief' ? 'brief' : 'full'; }catch(e){ return 'full'; } })();
+let _slipSel = null;
+function briefSlipCalc(p){
+  const row = p || {};
+  const c = calcPrRow(row);
+  const r2 = n => Math.round((Number(n)||0)*100)/100;
+  const salary  = (c.total||0) - (c.insCo||0);
+  const kasb = c.kasb||0, insEmp = c.insEmp||0, absent = c.absent||0, late = c.late||0, penalty = c.penalty||0;
+  const allow = Number(row.badlat)||0;
+  const net = salary - kasb - insEmp - absent - late - penalty + allow;
+  return { salary:r2(salary), kasb:r2(kasb), insEmp:r2(insEmp), absent:r2(absent), late:r2(late), penalty:r2(penalty), allow:r2(allow), net:r2(net) };
+}
+function briefSlipCardHTML(code, month, compact){
+  const row = (state.payroll[month]||[]).find(x=>x.empCode===code) || {empCode:code};
+  const b = briefSlipCalc(row);
+  const e = empObj(code) || {name:'—'};
+  const d = state.departments.find(x=>x.id===e.deptId);
+  const co = state.company;
+  const fs = compact ? 11 : 13, pad = compact ? 3 : 6;
+  const line = (lbl,val,sign,color)=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:${pad}px 0;border-bottom:1px dashed #e5e7eb;"><span style="color:#444;font-size:${fs}px;">${lbl}</span><span style="font-family:'Courier New',monospace;font-weight:700;font-size:${fs}px;color:${color};direction:ltr;">${sign}${fmt(val,2)}</span></div>`;
+  return `<div style="background:#fff;font-family:'Tajawal',Tahoma,sans-serif;max-width:${compact?'none':'420px'};border:1px solid #d9dde3;border-radius:${compact?10:16}px;overflow:hidden;color:#0d0d0f;">
+    <div style="background:linear-gradient(135deg,#0d1f2d,#1a3a4a);padding:${compact?'8px 12px':'14px 18px'};color:#fff;display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-size:${compact?9:11}px;opacity:.6;">قسيمة راتب مختصرة</div>
+        <div style="font-size:${compact?13:17}px;font-weight:800;">${escapeHTML(co.name||'Ziedane HR')}</div>
+      </div>
+      <div style="font-size:${compact?10:12}px;opacity:.75;">${monthLabel(month)}</div>
+    </div>
+    <div style="padding:${compact?'8px 12px':'14px 18px'};">
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:${compact?4:8}px;">
+        <div><div style="font-size:${fs+1}px;font-weight:800;">${escapeHTML(e.name)}</div><div style="font-size:${fs-1}px;color:#777;">${escapeHTML(d?.name||'')}</div></div>
+        <div style="font-size:${fs-1}px;color:#777;">كود: ${escapeHTML(String(e.code||code))}</div>
+      </div>
+      ${line('الراتب', b.salary, '', '#0d0d0f')}
+      ${line('كسب العمل', b.kasb, '− ', '#c0392b')}
+      ${line('تأمين العامل', b.insEmp, '− ', '#c0392b')}
+      ${line('غياب', b.absent, '− ', '#c0392b')}
+      ${line('تأخير', b.late, '− ', '#c0392b')}
+      ${line('جزاء', b.penalty, '− ', '#c0392b')}
+      ${line('بدلات', b.allow, '+ ', '#1a7f4b')}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:${compact?6:10}px;padding:${compact?'6px 10px':'10px 14px'};background:#0f3d2e;color:#fff;border-radius:8px;">
+        <span style="font-size:${fs+1}px;font-weight:800;">الصافي</span>
+        <span style="font-family:'Courier New',monospace;font-size:${compact?15:20}px;font-weight:900;color:#6EF0C0;direction:ltr;">${fmt(b.net,2)}</span>
+      </div>
+      ${compact?'':`<div style="margin-top:12px;text-align:left;"><button onclick="printSlip(${code},'${month}')" style="background:#0daf72;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-family:Tajawal,sans-serif;font-size:13px;font-weight:700;cursor:pointer;">🖨 طباعة</button></div>`}
+    </div>
+  </div>`;
+}
+function showBriefSlip(code, month, clickedEl){
+  gid('slip-display').innerHTML = briefSlipCardHTML(code, month, false);
+  const _card = gid('slip-display').firstElementChild; if(_card) _card.id = 'slip-content';   // عشان زرار الطباعة (printSlip) يلاقيها
+  document.querySelectorAll('#slip-list div[onclick]').forEach(el=>el.style.background='');
+  if(clickedEl) clickedEl.closest('div[onclick]')?.style && (clickedEl.closest('div[onclick]').style.background='#f7f7f5');
+}
+function openSlip(code, month, clickedEl){
+  _slipSel = {code, month};
+  if(_slipMode==='brief') showBriefSlip(code, month, clickedEl); else showSlipForEmp(code, month, clickedEl);
+}
+function _slipModeUI(){
+  const on = 'background:var(--accent);color:#fff;border-color:var(--accent);';
+  const f = gid('slip-mode-full'), b = gid('slip-mode-brief'), pa = gid('slip-print-all');
+  if(f) f.style.cssText = _slipMode==='full' ? on : '';
+  if(b) b.style.cssText = _slipMode==='brief' ? on : '';
+  if(pa) pa.style.display = _slipMode==='brief' ? '' : 'none';
+}
+function setSlipMode(mode){
+  _slipMode = mode==='brief' ? 'brief' : 'full';
+  try{ localStorage.setItem('zh_slip_mode', _slipMode); }catch(e){}
+  _slipModeUI();
+  if(_slipSel && (state.payroll[_slipSel.month]||[]).some(x=>x.empCode===_slipSel.code)){
+    openSlip(_slipSel.code, _slipSel.month, null);
+  }
+}
+function printAllBriefSlips(){
+  const key = _getYMValue('slip-year','slip-month');
+  const q = (gid('slip-search')?.value||'').toLowerCase();
+  const rows = (state.payroll[key]||[]).filter(p=>!q||empName(p.empCode).toLowerCase().includes(q));
+  if(!rows.length){ toast('لا توجد قسائم لهذا الشهر','warning'); return; }
+  const cards = rows.map(p=>briefSlipCardHTML(p.empCode, key, true)).join('');
+  const w = window.open('','_blank','width=900,height=1000');
+  if(!w){ toast('افتح النوافذ المنبثقة (popups) للمتصفح','error'); return; }
+  w.document.write(`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"/><title>قسائم الراتب المختصرة — ${monthLabel(key)}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet"/>
+    <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Tajawal,Tahoma,sans-serif;direction:rtl;padding:6mm;background:#fff;color:#0d0d0f;}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:5mm;}.grid>div{break-inside:avoid;page-break-inside:avoid;}
+    @media print{@page{size:A4;margin:6mm;}}</style></head><body><div class="grid">${cards}</div></body></html>`);
+  w.document.close();
+  w.onload = ()=>{ w.focus(); w.print(); };
+}
+
 function showSlipForEmp(code,month,clickedEl){
   const p=calcPrRow((state.payroll[month]||[]).find(x=>x.empCode===code)||{empCode:code});
   const e=empObj(code)||{name:'—',job:'—',pay:'—',deptId:''};
